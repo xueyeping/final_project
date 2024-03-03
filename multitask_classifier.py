@@ -23,6 +23,7 @@ from torch.utils.data import DataLoader
 from bert import BertModel
 from optimizer import AdamW
 from tqdm import tqdm
+from tokenizer import BertTokenizer
 
 from datasets import (
     SentenceClassificationDataset,
@@ -64,6 +65,7 @@ class MultitaskBERT(nn.Module):
     def __init__(self, config):
         super(MultitaskBERT, self).__init__()
         self.bert = BertModel.from_pretrained('bert-base-uncased')
+        self.tokenizer = BertTokenizer.from_pretrained('bert-large-uncased')
         # Pretrain mode does not require updating BERT paramters.
         for param in self.bert.parameters():
             if config.option == 'pretrain':
@@ -71,8 +73,12 @@ class MultitaskBERT(nn.Module):
             elif config.option == 'finetune':
                 param.requires_grad = True
         # You will want to add layers here to perform the downstream tasks.
-        ### TODO
-        raise NotImplementedError
+        self.dropout1 = nn.Dropout(config.hidden_dropout_prob)
+        self.dropout2 = nn.Dropout(config.hidden_dropout_prob)
+        self.dropout3 = nn.Dropout(config.hidden_dropout_prob)
+        self.proj_sent = nn.Linear(config.hidden_size, config.num_labels)
+        self.proj_para = nn.Linear(config.hidden_size, 1)
+        self.proj_simi = nn.Linear(config.hidden_size, 1)
 
 
     def forward(self, input_ids, attention_mask):
@@ -81,8 +87,8 @@ class MultitaskBERT(nn.Module):
         # Here, you can start by just returning the embeddings straight from BERT.
         # When thinking of improvements, you can later try modifying this
         # (e.g., by adding other layers).
-        ### TODO
-        raise NotImplementedError
+        pool_out = self.bert(input_ids, attention_mask)['pooler_output']
+        return pool_out
 
 
     def predict_sentiment(self, input_ids, attention_mask):
@@ -91,10 +97,22 @@ class MultitaskBERT(nn.Module):
         (0 - negative, 1- somewhat negative, 2- neutral, 3- somewhat positive, 4- positive)
         Thus, your output should contain 5 logits for each sentence.
         '''
-        ### TODO
-        raise NotImplementedError
+        pool_out = self.forward(input_ids, attention_mask)
+        out = self.dropout1(pool_out)
+        logits = self.proj_sent(out)
+        return logits
 
+    def get_pair_embeddings(self, input_ids_1, attention_mask_1,
+                           input_ids_2, attention_mask_2):
+        '''Given a batch of pairs of sentences, get the embeddings.'''
+        sep_token_id = torch.tensor([self.tokenizer.sep_token_id], dtype=torch.long, device=input_ids_1.device)
+        batch_sep_token_id = sep_token_id.repeat(input_ids_1.shape[0], 1)
+        input_id = torch.cat((input_ids_1, batch_sep_token_id, input_ids_2, batch_sep_token_id), dim=1)
+        attention_mask = torch.cat((attention_mask_1, torch.ones_like(batch_sep_token_id), attention_mask_2, torch.ones_like(batch_sep_token_id)), dim=1)                  
+        x = self.forward(input_id, attention_mask)
 
+        return x
+    
     def predict_paraphrase(self,
                            input_ids_1, attention_mask_1,
                            input_ids_2, attention_mask_2):
@@ -102,9 +120,17 @@ class MultitaskBERT(nn.Module):
         Note that your output should be unnormalized (a logit); it will be passed to the sigmoid function
         during evaluation.
         '''
-        ### TODO
-        raise NotImplementedError
+        #pool_out_1 = self.forward(input_ids_1, attention_mask_1)
+        #pool_out_2 = self.forward(input_ids_2, attention_mask_2)
+        #diff = pool_out_1 - pool_out_2
+        #out = self.dropout2(diff)
+        #logit = self.proj_para(out)
+        #return logit
 
+        x = self.get_pair_embeddings(input_ids_1, attention_mask_1, input_ids_2, attention_mask_2)
+        x = self.dropout2(x)
+        x = self.proj_para(x)
+        return x
 
     def predict_similarity(self,
                            input_ids_1, attention_mask_1,
@@ -112,10 +138,17 @@ class MultitaskBERT(nn.Module):
         '''Given a batch of pairs of sentences, outputs a single logit corresponding to how similar they are.
         Note that your output should be unnormalized (a logit).
         '''
-        ### TODO
-        raise NotImplementedError
+        #pool_out_1 = self.forward(input_ids_1, attention_mask_1)
+        #pool_out_2 = self.forward(input_ids_2, attention_mask_2)
+        #diff = pool_out_1 - pool_out_2
+        #out = self.dropout3(diff)
+        #logit = self.proj_simi(out)
+        #return logit
 
-
+        x = self.get_pair_embeddings(input_ids_1, attention_mask_1, input_ids_2, attention_mask_2)
+        x = self.dropout3(x)
+        x = self.proj_simi(x)
+        return x
 
 
 def save_model(model, optimizer, args, config, filepath):
@@ -143,16 +176,32 @@ def train_multitask(args):
     '''
     device = torch.device('cuda') if args.use_gpu else torch.device('cpu')
     # Create the data and its corresponding datasets and dataloader.
-    sst_train_data, num_labels,para_train_data, sts_train_data = load_multitask_data(args.sst_train,args.para_train,args.sts_train, split ='train')
-    sst_dev_data, num_labels,para_dev_data, sts_dev_data = load_multitask_data(args.sst_dev,args.para_dev,args.sts_dev, split ='train')
-
+    sst_train_data, num_labels, para_train_data, sts_train_data = load_multitask_data(args.sst_train,args.para_train,args.sts_train, split ='train')
+    sst_dev_data, num_labels, para_dev_data, sts_dev_data = load_multitask_data(args.sst_dev,args.para_dev,args.sts_dev, split ='train')
+    num_labels = len(num_labels)
+    # sst
     sst_train_data = SentenceClassificationDataset(sst_train_data, args)
     sst_dev_data = SentenceClassificationDataset(sst_dev_data, args)
-
     sst_train_dataloader = DataLoader(sst_train_data, shuffle=True, batch_size=args.batch_size,
                                       collate_fn=sst_train_data.collate_fn)
     sst_dev_dataloader = DataLoader(sst_dev_data, shuffle=False, batch_size=args.batch_size,
                                     collate_fn=sst_dev_data.collate_fn)
+    # para
+    para_train_data = SentencePairDataset(para_train_data, args)
+    para_dev_data = SentencePairDataset(para_dev_data, args)
+    para_train_dataloader = DataLoader(para_train_data, shuffle=True, batch_size=args.batch_size,
+                                      collate_fn=para_train_data.collate_fn)
+    para_dev_dataloader = DataLoader(para_dev_data, shuffle=False, batch_size=args.batch_size,
+                                    collate_fn=para_dev_data.collate_fn)
+    
+    # sts
+    sts_train_data = SentencePairDataset(sts_train_data, args, isRegression=True)
+    sts_dev_data = SentencePairDataset(sts_dev_data, args, isRegression=True)
+    sts_train_dataloader = DataLoader(sts_train_data, shuffle=True, batch_size=args.batch_size,
+                                      collate_fn=sts_train_data.collate_fn)
+    sts_dev_dataloader = DataLoader(sts_dev_data, shuffle=False, batch_size=args.batch_size,
+                                    collate_fn=sts_dev_data.collate_fn)
+
 
     # Init model.
     config = {'hidden_dropout_prob': args.hidden_dropout_prob,
@@ -175,17 +224,43 @@ def train_multitask(args):
         model.train()
         train_loss = 0
         num_batches = 0
-        for batch in tqdm(sst_train_dataloader, desc=f'train-{epoch}', disable=TQDM_DISABLE):
-            b_ids, b_mask, b_labels = (batch['token_ids'],
-                                       batch['attention_mask'], batch['labels'])
-
+        for sst_batch, para_batch, sts_batch in tqdm(zip(sst_train_dataloader, para_train_dataloader, sts_train_dataloader), desc=f'train-{epoch}', disable=TQDM_DISABLE):
+            # sst
+            b_ids, b_mask, b_labels = (sst_batch['token_ids'],
+                                       sst_batch['attention_mask'], sst_batch['labels'])
             b_ids = b_ids.to(device)
             b_mask = b_mask.to(device)
             b_labels = b_labels.to(device)
 
             optimizer.zero_grad()
             logits = model.predict_sentiment(b_ids, b_mask)
-            loss = F.cross_entropy(logits, b_labels.view(-1), reduction='sum') / args.batch_size
+            sst_loss = F.cross_entropy(logits, b_labels.view(-1), reduction='sum') / args.batch_size
+
+            # para
+            b_ids_1, b_ids_2, b_mask_1, b_mask_2, b_labels = \
+                para_batch['token_ids_1'], para_batch['token_ids_2'], para_batch['attention_mask_1'], para_batch['attention_mask_2'], para_batch['labels']
+            b_ids_1 = b_ids_1.to(device)
+            b_ids_2 = b_ids_2.to(device)
+            b_mask_1 = b_mask_1.to(device)
+            b_mask_2 = b_mask_2.to(device)
+            b_labels = b_labels.to(device)
+            logits = model.predict_paraphrase(b_ids_1, b_mask_1, b_ids_2, b_mask_2)
+            #y_hat = logits.sigmoid().round().flatten()
+            para_loss = F.binary_cross_entropy_with_logits(logits.view(-1), b_labels.float(), reduction='sum') / args.batch_size
+
+            # sts
+            b_ids_1, b_ids_2, b_mask_1, b_mask_2, b_labels = \
+                sts_batch['token_ids_1'], sts_batch['token_ids_2'], sts_batch['attention_mask_1'], sts_batch['attention_mask_2'], sts_batch['labels']
+            b_ids_1 = b_ids_1.to(device)
+            b_ids_2 = b_ids_2.to(device)
+            b_mask_1 = b_mask_1.to(device)
+            b_mask_2 = b_mask_2.to(device)
+            b_labels = b_labels.to(device)
+            logits = model.predict_similarity(b_ids_1, b_mask_1, b_ids_2, b_mask_2)
+            #print(logits)
+            #print(b_labels)
+            sts_loss =  F.mse_loss(logits.view(-1), b_labels.float(), reduction='sum') / args.batch_size
+            loss = sst_loss + para_loss + sts_loss
 
             loss.backward()
             optimizer.step()
@@ -195,15 +270,15 @@ def train_multitask(args):
 
         train_loss = train_loss / (num_batches)
 
-        train_acc, train_f1, *_ = model_eval_sst(sst_train_dataloader, model, device)
-        dev_acc, dev_f1, *_ = model_eval_sst(sst_dev_dataloader, model, device)
-
+        # train_acc, train_f1, *_ = model_eval_sst(sst_train_dataloader, model, device)
+        # dev_acc, dev_f1, *_ = model_eval_sst(sst_dev_dataloader, model, device)
+        sst_accuracy,_, _, para_accuracy, _, _, sts_corr, _, _ = model_eval_multitask(sst_dev_dataloader, para_dev_dataloader, sts_dev_dataloader, model, device)
+        dev_acc = (sst_accuracy + para_accuracy + sts_corr)/3
         if dev_acc > best_dev_acc:
             best_dev_acc = dev_acc
             save_model(model, optimizer, args, config, args.filepath)
 
-        print(f"Epoch {epoch}: train loss :: {train_loss :.3f}, train acc :: {train_acc :.3f}, dev acc :: {dev_acc :.3f}")
-
+        #print(f"Epoch {epoch}: train loss :: {train_loss :.3f}, train acc :: {train_acc :.3f}, dev acc :: {dev_acc :.3f}")
 
 def test_multitask(args):
     '''Test and save predictions on the dev and test sets of all three tasks.'''
