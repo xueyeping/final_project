@@ -24,6 +24,7 @@ from bert import BertModel
 from optimizer import AdamW
 from tqdm import tqdm
 from tokenizer import BertTokenizer
+from pcgrad import PCGrad
 
 from datasets import (
     SentenceClassificationDataset,
@@ -79,6 +80,10 @@ class MultitaskBERT(nn.Module):
         self.proj_sent = nn.Linear(config.hidden_size, config.num_labels)
         self.proj_para = nn.Linear(config.hidden_size, 1)
         self.proj_simi = nn.Linear(config.hidden_size, 1)
+        self.ps_cosine = nn.CosineSimilarity(dim=1)
+        self.ps_dropout_1 = nn.Dropout(config.hidden_dropout_prob)
+        self.ps_dropout_2 = nn.Dropout(config.hidden_dropout_prob)
+        self.ps_relu = nn.ReLU()
 
 
     def forward(self, input_ids, attention_mask):
@@ -138,17 +143,22 @@ class MultitaskBERT(nn.Module):
         '''Given a batch of pairs of sentences, outputs a single logit corresponding to how similar they are.
         Note that your output should be unnormalized (a logit).
         '''
-        #pool_out_1 = self.forward(input_ids_1, attention_mask_1)
-        #pool_out_2 = self.forward(input_ids_2, attention_mask_2)
+        pool_out_1 = self.forward(input_ids_1, attention_mask_1)
+        outputs_1 = self.ps_dropout_1(pool_out_1)
+        pool_out_2 = self.forward(input_ids_2, attention_mask_2)
+        outputs_2 = self.ps_dropout_2(pool_out_2)
+        simscores = self.ps_cosine(outputs_1, outputs_2)
+        logit = self.ps_relu(simscores)*5
+        return logit
         #diff = pool_out_1 - pool_out_2
         #out = self.dropout3(diff)
         #logit = self.proj_simi(out)
         #return logit
 
-        x = self.get_pair_embeddings(input_ids_1, attention_mask_1, input_ids_2, attention_mask_2)
-        x = self.dropout3(x)
-        x = self.proj_simi(x)
-        return x
+        # x = self.get_pair_embeddings(input_ids_1, attention_mask_1, input_ids_2, attention_mask_2)
+        # x = self.dropout3(x)
+        # x = self.proj_simi(x)
+        # return x
 
 
 def save_model(model, optimizer, args, config, filepath):
@@ -217,6 +227,7 @@ def train_multitask(args):
 
     lr = args.lr
     optimizer = AdamW(model.parameters(), lr=lr)
+    optimizer = PCGrad(optimizer)
     best_dev_acc = 0
 
     # Run for the specified number of epochs.
@@ -257,12 +268,17 @@ def train_multitask(args):
             b_mask_2 = b_mask_2.to(device)
             b_labels = b_labels.to(device)
             logits = model.predict_similarity(b_ids_1, b_mask_1, b_ids_2, b_mask_2)
-            #print(logits)
-            #print(b_labels)
+            #pool_out_1, pool_out_2 = model.predict_similarity(b_ids_1, b_mask_1, b_ids_2, b_mask_2)
+            #sts_loss = F.cosine_embedding_loss(pool_out_1, pool_out_2, torch.ones(args.batch_size).to(device)) / args.batch_size
             sts_loss =  F.mse_loss(logits.view(-1), b_labels.float(), reduction='sum') / args.batch_size
             loss = sst_loss + para_loss + sts_loss
 
-            loss.backward()
+            #loss.backward()
+            #optimizer.step()
+            
+            losses = [sst_loss, para_loss, sts_loss]
+            optimizer.pc_backward(losses)
+            # sum(losses).backward()
             optimizer.step()
 
             train_loss += loss.item()
