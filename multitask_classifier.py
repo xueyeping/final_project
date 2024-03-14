@@ -143,6 +143,7 @@ class MultitaskBERT(nn.Module):
         '''Given a batch of pairs of sentences, outputs a single logit corresponding to how similar they are.
         Note that your output should be unnormalized (a logit).
         '''
+       #using cosine similarity                        
         pool_out_1 = self.forward(input_ids_1, attention_mask_1)
         outputs_1 = self.ps_dropout_1(pool_out_1)
         pool_out_2 = self.forward(input_ids_2, attention_mask_2)
@@ -150,10 +151,6 @@ class MultitaskBERT(nn.Module):
         simscores = self.ps_cosine(outputs_1, outputs_2)
         logit = self.ps_relu(simscores)*5
         return logit
-        #diff = pool_out_1 - pool_out_2
-        #out = self.dropout3(diff)
-        #logit = self.proj_simi(out)
-        #return logit
 
         # x = self.get_pair_embeddings(input_ids_1, attention_mask_1, input_ids_2, attention_mask_2)
         # x = self.dropout3(x)
@@ -227,6 +224,7 @@ def train_multitask(args):
 
     lr = args.lr
     optimizer = AdamW(model.parameters(), lr=lr)
+    #using gradient surgery
     optimizer = PCGrad(optimizer)
     best_dev_acc = 0
 
